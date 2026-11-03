@@ -1057,7 +1057,6 @@ def paste_text(text):
 # ====================================================================================================
 #  PART 4 - Controller (start / stop / process) and the widget
 # ====================================================================================================
-BG, FG, MUTED = "#1b1d23", "#f2f3f5", "#8a8f98"
 COLORS = {"idle": "#8a8f98", "starting": "#4361ee", "rec": "#e5383b", "recp": "#7b2cbf",
           "busy": "#f4a261", "ok": "#2a9d8f", "err": "#9d0208"}
 
@@ -1214,11 +1213,154 @@ class Controller:
         threading.Thread(target=work, daemon=True).start()
 
 
+# ====================================================================================================
+#  PART 4b - The widget (modern UI).  Paste this in place of the old  BG/FG/MUTED line  and the old
+#  `class Widget:` (everything from `class Widget:` down to the line `# ---------------- Tray`).
+#  COLORS, make_icon, ICONS and Controller stay exactly as they are.
+# ====================================================================================================
+from tkinter import font as tkfont
+
+# ---- theme (dark) ----
+BG = "#16181d"          # window
+SURFACE = "#1f2229"     # inputs, tracks, cards
+SURFACE_HI = "#2a2e38"  # hover / selected tab
+BORDER = "#2f333d"
+FG = "#f2f3f5"
+MUTED = "#8a8f98"
+RED, PURPLE = "#e5383b", "#7b2cbf"
+ERR_TEXT = "#ff7b7b"
+WIDTH = 400             # window width in pixels (content is WIDTH - 32 wide)
+
+
+def _rgb(c):
+    c = c.lstrip("#")
+    return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def mix(c1, c2, t):
+    """Blend colour c1 towards c2 (t = 0..1). Tk has no alpha, so fades are done by blending with the background."""
+    a, b = _rgb(c1), _rgb(c2)
+    return "#%02x%02x%02x" % tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def pretty_hotkey(h):
+    return "+".join(p.capitalize() for p in h.split("+"))
+
+
+def round_rect(cv, x1, y1, x2, y2, r, **kw):
+    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2,
+           x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+    return cv.create_polygon(pts, smooth=True, **kw)
+
+
+class Pill(tk.Canvas):
+    """A flat rounded button with a hover colour."""
+
+    def __init__(self, parent, text, command, width, height=34, bg=SURFACE, hover=SURFACE_HI, fg=FG,
+                 outline=None, radius=10, font=None, bgcolor=BG):
+        super().__init__(parent, width=width, height=height, bg=bgcolor, highlightthickness=0, bd=0, cursor="hand2")
+        self.w, self.h, self.cmd, self.text = width, height, command, text
+        self.c_bg, self.c_hover, self.fg, self.outline, self.r = bg, hover, fg, outline, radius
+        self.font, self.hot = font, False
+        self.bind("<Enter>", lambda e: self._hot(True))
+        self.bind("<Leave>", lambda e: self._hot(False))
+        self.bind("<ButtonRelease-1>", self._release)
+        self.draw()
+
+    def _hot(self, v):
+        self.hot = v
+        self.draw()
+
+    def _release(self, e):
+        if 0 <= e.x <= self.w and 0 <= e.y <= self.h and self.cmd:
+            self.cmd()
+
+    def set(self, text=None, bg=None, hover=None, fg=None):
+        if text is not None:
+            self.text = text
+        if bg is not None:
+            self.c_bg = bg
+        if hover is not None:
+            self.c_hover = hover
+        if fg is not None:
+            self.fg = fg
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        fill = self.c_hover if self.hot else self.c_bg
+        round_rect(self, 1, 1, self.w - 1, self.h - 1, self.r, fill=fill, outline=self.outline or fill, width=1)
+        self.create_text(self.w // 2, self.h // 2, text=self.text, fill=self.fg, font=self.font)
+
+
+class Segmented(tk.Canvas):
+    """A segmented control (like iOS / Windows 11 pivots). `command(index)` fires when the choice changes."""
+
+    def __init__(self, parent, labels, command, width, height=36, colors=None, bgcolor=BG, font=None):
+        super().__init__(parent, width=width, height=height, bg=bgcolor, highlightthickness=0, bd=0, cursor="hand2")
+        self.labels, self.cmd, self.w, self.h, self.font = labels, command, width, height, font
+        self.colors = colors or [SURFACE_HI] * len(labels)
+        self.sel = 0
+        self.bind("<Button-1>", self._click)
+        self.draw()
+
+    def _click(self, e):
+        sw = (self.w - 8) / len(self.labels)
+        i = max(0, min(len(self.labels) - 1, int((e.x - 4) // sw)))
+        if i != self.sel:
+            self.sel = i
+            self.draw()
+            if self.cmd:
+                self.cmd(i)
+
+    def select(self, i):
+        self.sel = i
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        round_rect(self, 1, 1, self.w - 1, self.h - 1, 11, fill=SURFACE, outline=BORDER)
+        sw = (self.w - 8) / len(self.labels)
+        for i, lab in enumerate(self.labels):
+            x1 = 4 + i * sw
+            if i == self.sel:
+                round_rect(self, x1, 4, x1 + sw, self.h - 4, 8, fill=self.colors[i], outline="")
+            self.create_text(x1 + sw / 2, self.h / 2, text=lab, font=self.font,
+                             fill="#ffffff" if i == self.sel else MUTED)
+
+
+class Switch(tk.Canvas):
+    """A small on/off toggle bound to a tk.BooleanVar."""
+
+    def __init__(self, parent, var, command=None, bgcolor=BG):
+        super().__init__(parent, width=40, height=22, bg=bgcolor, highlightthickness=0, bd=0, cursor="hand2")
+        self.var, self.cmd = var, command
+        self.bind("<Button-1>", self.toggle)
+        var.trace_add("write", lambda *a: self.draw())
+        self.draw()
+
+    def toggle(self, _e=None):
+        self.var.set(not self.var.get())
+        if self.cmd:
+            self.cmd()
+
+    def draw(self):
+        self.delete("all")
+        on = bool(self.var.get())
+        round_rect(self, 1, 1, 39, 21, 10, fill=PURPLE if on else SURFACE_HI, outline="")
+        x = 29 if on else 11
+        self.create_oval(x - 7, 11 - 7, x + 7, 11 + 7, fill="#ffffff", outline="")
+
+
 class Widget:
     def __init__(self, ctl, ui_q):
         global OUR_HWND
         self.ctl, self.q, self.tray = ctl, ui_q, None
         self.expanded = False
+        self.sel_mode = "clean"        # which mode the big button starts / stops with
+        self.rec_mode = "clean"
+        self.rec_hot = False
+        self._last_key = None
         r = self.root = tk.Tk()
         r.title("Gemini Dictate")
         r.configure(bg=BG)
@@ -1230,46 +1372,73 @@ class Widget:
         r.protocol("WM_DELETE_WINDOW", self.hide)       # the X hides to the tray
         r.resizable(False, False)
 
+        fams = set(tkfont.families(r))
+        self.fam = "Segoe UI Variable Text" if "Segoe UI Variable Text" in fams else "Segoe UI"
+        self.mono_fam = "Cascadia Mono" if "Cascadia Mono" in fams else "Consolas"
+        self.setup_styles()
+
+        tk.Frame(r, width=WIDTH, height=1, bg=BG).pack()      # fixes the window width
+
+        # ---- header: status dot, status text, settings, hide ----
         top = tk.Frame(r, bg=BG)
-        top.pack(fill="x", padx=10, pady=(10, 4))
+        top.pack(fill="x", padx=16, pady=(12, 8))
+        self.b_hide = Pill(top, "\u2013", self.hide, 32, 30, font=self.f(11, True), radius=9)
+        self.b_hide.pack(side="right")
+        self.b_gear = Pill(top, "\u2699", self.toggle_panel, 32, 30, font=(self.fam, 12), radius=9)
+        self.b_gear.pack(side="right", padx=(0, 6))
         self.dot = tk.Canvas(top, width=14, height=14, bg=BG, highlightthickness=0)
         self.dot.pack(side="left")
         self.dot_id = self.dot.create_oval(2, 2, 12, 12, fill=COLORS["idle"], outline="")
-        self.status = tk.Label(top, text="Starting...", bg=BG, fg=FG, font=("Segoe UI", 10, "bold"),
-                               anchor="w", width=34)
-        self.status.pack(side="left", padx=(8, 0))
-        tk.Button(top, text="\u2013", bg="#2b2f3a", activebackground="#3a3f4d", fg="white", relief="flat", bd=0,
-                  font=("Segoe UI", 10, "bold"), padx=9, cursor="hand2", command=self.hide).pack(side="right")
+        sf = tk.Frame(top, bg=BG, height=44)
+        sf.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        sf.pack_propagate(False)
+        self.status = tk.Label(sf, text="Starting...", bg=BG, fg=FG, font=self.f(10, True), anchor="w",
+                               justify="left", wraplength=262)
+        self.status.pack(fill="both", expand=True)
 
-        row = tk.Frame(r, bg=BG)
-        row.pack(fill="x", padx=10, pady=4)
-        bs = dict(relief="flat", bd=0, font=("Segoe UI", 10, "bold"), fg="white", padx=12, pady=7, cursor="hand2")
-        self.b_clean = tk.Button(row, text="●  Transcribe", bg="#e5383b", activebackground="#c1121f",
-                                 command=lambda: ctl.toggle("clean"), **bs)
-        self.b_clean.pack(side="left")
-        self.b_prompt = tk.Button(row, text="✦  Prompt mode", bg="#7b2cbf", activebackground="#5a189a",
-                                  command=lambda: ctl.toggle("prompt"), **bs)
-        self.b_prompt.pack(side="left", padx=6)
-        self.b_cancel = tk.Button(row, text="✕", bg="#444", activebackground="#333", command=ctl.cancel, **bs)
-        tk.Button(row, text="Gemini", bg="#2b2f3a", activebackground="#3a3f4d", command=ctl.show_gemini,
-                  **bs).pack(side="right")
-        self.b_more = tk.Button(row, text="▾", bg="#2b2f3a", activebackground="#3a3f4d", command=self.toggle_panel,
-                                **bs)
-        self.b_more.pack(side="right", padx=6)
+        # ---- hero: big record button + mode switch ----
+        hero = tk.Frame(r, bg=BG)
+        hero.pack(fill="x", padx=16, pady=(0, 12))
+        self.rec_cv = tk.Canvas(hero, width=88, height=88, bg=BG, highlightthickness=0, cursor="hand2")
+        self.rec_cv.pack(side="left")
+        self.rec_cv.bind("<Button-1>", lambda e: self.ctl.toggle(self.sel_mode))
+        self.rec_cv.bind("<Enter>", lambda e: setattr(self, "rec_hot", True))
+        self.rec_cv.bind("<Leave>", lambda e: setattr(self, "rec_hot", False))
+        col = tk.Frame(hero, bg=BG)
+        col.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        self.mode_seg = Segmented(col, ["Transcribe", "\u2726  Prompt"], self.on_mode, WIDTH - 32 - 88 - 16, 38,
+                                  colors=[RED, PURPLE], font=self.f(10, True))
+        self.mode_seg.pack(pady=(8, 0))
+        crow = tk.Frame(col, bg=BG)
+        crow.pack(fill="x", pady=(10, 0))
+        self.caption = tk.Label(crow, text="", bg=BG, fg=MUTED, font=self.f(9), anchor="w")
+        self.caption.pack(side="left")
+        self.b_cancel = Pill(crow, "Cancel", self.ctl.cancel, 64, 26, fg=ERR_TEXT, radius=8, font=self.f(9))
 
+        # ---- convert + Gemini window ----
         row2 = tk.Frame(r, bg=BG)
-        row2.pack(fill="x", padx=10, pady=(0, 4))
-        self.b_convert = tk.Button(row2, text="✦  Convert last transcript to a prompt", bg="#5a189a",
-                                   activebackground="#3c096c", command=lambda: ctl.reprocess("prompt"), **bs)
+        row2.pack(fill="x", padx=16, pady=(0, 12))
+        self.b_convert = Pill(row2, "\u2726  Convert last to prompt", lambda: self.ctl.reprocess("prompt"), 252, 36,
+                              bg=BG, hover=mix(PURPLE, BG, 0.7), fg="#d0a8f5", outline=PURPLE, font=self.f(9, True))
         self.b_convert.pack(side="left")
+        self.b_gemini = Pill(row2, "Gemini window", self.ctl.show_gemini, 104, 36, font=self.f(9))
+        self.b_gemini.pack(side="right")
 
-        self.hint = tk.Label(r, text=f"{HOTKEY.upper()} = transcribe   {PROMPT_HOTKEY.upper()} = prompt mode\n"
-                                     f"{TOGGLE_HOTKEY.upper()} = show / hide this widget",
-                             bg=BG, fg=MUTED, font=("Segoe UI", 8), justify="left")
-        self.hint.pack(anchor="w", padx=12, pady=(0, 8))
+        # ---- hotkey chips ----
+        hk = tk.Frame(r, bg=BG)
+        hk.pack(fill="x", padx=16, pady=(0, 14))
+        for i, (key, desc) in enumerate(((HOTKEY, "Transcribe"), (PROMPT_HOTKEY, "Prompt mode"),
+                                         (TOGGLE_HOTKEY, "Show / hide"))):
+            c = tk.Frame(hk, bg=BG)
+            c.grid(row=0, column=i, sticky="w", padx=(0, 10))
+            tk.Label(c, text=pretty_hotkey(key), bg=SURFACE, fg=FG, font=(self.mono_fam, 8), padx=6, pady=2).pack(
+                anchor="w")
+            tk.Label(c, text=desc, bg=BG, fg=MUTED, font=self.f(8)).pack(anchor="w", pady=(3, 0))
 
+        # ---- settings drawer ----
         self.panel = tk.Frame(r, bg=BG)
         self.build_panel()
+        self.refresh_caption()
 
         r.update_idletasks()
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
@@ -1278,76 +1447,236 @@ class Widget:
             r.withdraw()                      # start in the tray; bring it back with the hotkey or the tray icon
         r.update()
         OUR_HWND = _root(r.winfo_id())
+        self.style_titlebar(OUR_HWND)
+        self.draw_rec("idle", time.time())
         self.poll()
         self.poll_focus()
+        self.animate()
 
-    # ---- expanded panel ----
+    # ---- look & feel helpers ----
+    def f(self, size=10, bold=False):
+        return (self.fam, size, "bold") if bold else (self.fam, size)
+
+    def setup_styles(self):
+        r = self.root
+        st = ttk.Style(r)
+        try:
+            st.theme_use("clam")
+        except Exception:
+            pass
+        st.configure("D.TCombobox", fieldbackground=SURFACE, background=SURFACE_HI, foreground=FG, arrowcolor=FG,
+                     bordercolor=BORDER, lightcolor=SURFACE, darkcolor=SURFACE, selectbackground=SURFACE,
+                     selectforeground=FG, padding=6)
+        st.map("D.TCombobox", fieldbackground=[("readonly", SURFACE)], foreground=[("readonly", FG)],
+               selectbackground=[("readonly", SURFACE)], selectforeground=[("readonly", FG)])
+        r.option_add("*TCombobox*Listbox.background", SURFACE)
+        r.option_add("*TCombobox*Listbox.foreground", FG)
+        r.option_add("*TCombobox*Listbox.selectBackground", PURPLE)
+        r.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        r.option_add("*TCombobox*Listbox.font", (self.fam, 9))
+        st.configure("D.Vertical.TScrollbar", background=SURFACE_HI, troughcolor=SURFACE, bordercolor=SURFACE,
+                     lightcolor=SURFACE_HI, darkcolor=SURFACE_HI, relief="flat")
+        st.layout("D.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+            ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+
+    def style_titlebar(self, hwnd):
+        """Dark title bar that matches the window (Windows 10 20H1+ / Windows 11). Silently skipped if unsupported."""
+        try:
+            dwm = ctypes.windll.dwmapi
+
+            def put(attr, val):
+                v = ctypes.c_int(val)
+                dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), attr, ctypes.byref(v), 4)
+
+            bgr = lambda h: int(h[5:7] + h[3:5] + h[1:3], 16)
+            put(20, 1)              # DWMWA_USE_IMMERSIVE_DARK_MODE
+            put(35, bgr(BG))        # DWMWA_CAPTION_COLOR (Windows 11)
+            put(36, bgr(FG))        # DWMWA_TEXT_COLOR
+            put(34, bgr(BORDER))    # DWMWA_BORDER_COLOR
+        except Exception:
+            pass
+
+    def make_text(self, parent, height, font):
+        box = tk.Frame(parent, bg=BORDER)
+        inner = tk.Frame(box, bg=SURFACE)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        sb = ttk.Scrollbar(inner, orient="vertical", style="D.Vertical.TScrollbar")
+        t = tk.Text(inner, height=height, width=10, wrap="word", bg=SURFACE, fg=FG, insertbackground=FG,
+                    relief="flat", bd=0, padx=8, pady=6, font=font, highlightthickness=0, selectbackground=PURPLE,
+                    yscrollcommand=sb.set)
+        sb.config(command=t.yview)
+        sb.pack(side="right", fill="y")
+        t.pack(side="left", fill="both", expand=True)
+        t.bind("<Button-1>", lambda e: e.widget.focus_force())    # the widget is a tool window: take focus on click
+        return box, t
+
+    def label(self, parent, text, pady=(8, 2)):
+        tk.Label(parent, text=text, bg=BG, fg=MUTED, font=self.f(9), anchor="w").pack(fill="x", pady=pady)
+
+    def switch_row(self, parent, text, var, cmd):
+        row = tk.Frame(parent, bg=BG)
+        row.pack(fill="x", pady=4)
+        lbl = tk.Label(row, text=text, bg=BG, fg=FG, font=self.f(9), anchor="w")
+        lbl.pack(side="left")
+        sw = Switch(row, var, cmd)
+        sw.pack(side="right")
+        lbl.bind("<Button-1>", lambda e: sw.toggle())
+
+    # ---- big record button ----
+    def draw_rec(self, st, t):
+        c = self.rec_cv
+        c.delete("all")
+        col = RED if self.sel_mode == "clean" else PURPLE
+        cx = cy = 44
+        if st == "rec":
+            for off in (0.0, 0.5):
+                ph = (t * 0.9 + off) % 1.0
+                rad = 32 + ph * 11
+                c.create_oval(cx - rad, cy - rad, cx + rad, cy + rad, outline=mix(col, BG, 0.2 + 0.8 * ph), width=2)
+        disk = col
+        if st in ("starting", "busy"):
+            disk = SURFACE_HI
+        elif self.rec_hot:
+            disk = mix(col, "#ffffff", 0.14)
+        c.create_oval(cx - 31, cy - 31, cx + 31, cy + 31, fill=disk, outline="")
+        w = "#ffffff"
+        if st == "rec":                                         # stop square
+            round_rect(c, cx - 10, cy - 10, cx + 10, cy + 10, 4, fill=w, outline="")
+        elif st in ("starting", "busy"):                        # spinner
+            c.create_arc(cx - 14, cy - 14, cx + 14, cy + 14, start=(t * 300) % 360, extent=110, style="arc",
+                         outline=w, width=3)
+        else:                                                   # microphone
+            round_rect(c, cx - 6, cy - 16, cx + 6, cy + 2, 6, fill=w, outline="")
+            c.create_arc(cx - 12, cy - 9, cx + 12, cy + 11, start=180, extent=180, style="arc", outline=w, width=2)
+            c.create_line(cx, cy + 11, cx, cy + 18, fill=w, width=2)
+            c.create_line(cx - 6, cy + 18, cx + 6, cy + 18, fill=w, width=2)
+
+    def animate(self):
+        try:
+            if not self.is_hidden():
+                st = self.ctl.state
+                t = time.time()
+                key = (st, self.sel_mode, self.rec_hot)
+                if st != "idle" or key != self._last_key:
+                    self.draw_rec(st, t)
+                    self._last_key = key
+                if st == "rec":                                  # gently pulse the status dot
+                    col = COLORS["recp" if self.rec_mode == "prompt" else "rec"]
+                    self.dot.itemconfig(self.dot_id, fill=mix(col, BG, 0.5 * abs(((t * 1.5) % 2) - 1)))
+        except Exception:
+            log("animate error\n" + traceback.format_exc())
+        self.root.after(40, self.animate)
+
+    def on_mode(self, i):
+        self.sel_mode = "clean" if i == 0 else "prompt"
+        self.refresh_caption()
+
+    def refresh_caption(self):
+        hk = pretty_hotkey(HOTKEY if self.sel_mode == "clean" else PROMPT_HOTKEY)
+        if self.ctl.state == "rec":
+            self.caption.config(text="Click to stop  \u2192  " + ("Transcribe" if self.sel_mode == "clean" else "Prompt"))
+        else:
+            self.caption.config(text=hk)
+
+    def set_rec_ui(self, recording):
+        if recording:
+            self.b_cancel.pack(side="right")
+        else:
+            self.b_cancel.pack_forget()
+        self.refresh_caption()
+
+    # ---- settings drawer ----
     def build_panel(self):
         p = self.panel
-        lab = dict(bg=BG, fg=MUTED, font=("Segoe UI", 9), anchor="w")
-        tk.Frame(p, bg="#333", height=1).pack(fill="x", padx=10, pady=4)
+        tk.Frame(p, bg=BORDER, height=1).pack(fill="x")
+        self.tab_seg = Segmented(p, ["General", "Prompts", "Activity"], self.on_tab, WIDTH - 32, 32,
+                                 colors=[SURFACE_HI] * 3, font=self.f(9, True))
+        self.tab_seg.pack(padx=16, pady=(12, 8))
+        host = tk.Frame(p, bg=BG)
+        host.pack(fill="x", padx=16, pady=(0, 14))
+        self.page_names = ["General", "Prompts", "Activity"]
+        self.pages = {n: tk.Frame(host, bg=BG) for n in self.page_names}
+        self.build_general(self.pages["General"])
+        self.build_prompts(self.pages["Prompts"])
+        self.build_activity(self.pages["Activity"])
+        self.show_page("General")
 
+    def on_tab(self, i):
+        self.show_page(self.page_names[i])
+
+    def show_page(self, name):
+        for n, fr in self.pages.items():
+            fr.pack_forget()
+        self.pages[name].pack(fill="x")
+        self.tab_seg.select(self.page_names.index(name))
+        self.root.update_idletasks()
+        if self.expanded:
+            self.fit_on_screen()
+
+    def build_general(self, p):
         self.clean_var = tk.BooleanVar(value=bool(settings.get("clean_ai")))
-        tk.Checkbutton(p, text="Also clean the transcript with AI in Transcribe mode", variable=self.clean_var,
-                       command=self.on_clean_toggle, bg=BG, fg=FG, selectcolor="#2b2f3a", activebackground=BG,
-                       activeforeground=FG, font=("Segoe UI", 9)).pack(anchor="w", padx=8)
-
+        self.switch_row(p, "Clean the transcript with AI (Transcribe mode)", self.clean_var, self.on_clean_toggle)
         self.hidden_var = tk.BooleanVar(value=bool(settings.get("start_hidden", True)))
-        tk.Checkbutton(p, text=f"Start hidden in the tray (show / hide with {TOGGLE_HOTKEY.upper()})",
-                       variable=self.hidden_var, command=self.on_hidden_toggle, bg=BG, fg=FG, selectcolor="#2b2f3a",
-                       activebackground=BG, activeforeground=FG, font=("Segoe UI", 9)).pack(anchor="w", padx=8)
-
-        tk.Label(p, text="AI model for cleaning / prompt mode", **lab).pack(fill="x", padx=10, pady=(6, 0))
-        self.model_box = ttk.Combobox(p, state="readonly", width=48)
-        self.model_box.pack(padx=10, pady=2, anchor="w")
+        self.switch_row(p, "Start hidden in the tray", self.hidden_var, self.on_hidden_toggle)
+        self.label(p, "AI model for cleaning / prompt mode", pady=(10, 3))
+        self.model_box = ttk.Combobox(p, state="readonly", style="D.TCombobox", font=(self.fam, 9))
+        self.model_box.pack(fill="x")
         self.model_box.bind("<<ComboboxSelected>>", self.on_model)
         self.model_keys = []
         self.refresh_models()
+        row = tk.Frame(p, bg=BG)
+        row.pack(fill="x", pady=(14, 0))
+        Pill(row, "Diagnose Gemini", self.ctl.diagnose, 176, 32, font=self.f(9)).pack(side="left")
+        Pill(row, "Open log", lambda: os.path.exists(LOG) and os.startfile(LOG), 176, 32, font=self.f(9)).pack(
+            side="right")
 
-        tk.Label(p, text="Prompt sent to the AI model (editable):", **lab).pack(fill="x", padx=10, pady=(8, 0))
-        pr = tk.Frame(p, bg=BG)
-        pr.pack(fill="x", padx=10)
-        self.kind_box = ttk.Combobox(pr, state="readonly", width=22, values=["Prompt mode", "Transcribe + AI clean"])
-        self.kind_box.current(0)
-        self.kind_box.pack(side="left")
-        self.kind_box.bind("<<ComboboxSelected>>", lambda e: self.load_prompt())
-        sb = dict(relief="flat", bd=0, bg="#2b2f3a", fg="white", activebackground="#3a3f4d", padx=8, pady=3,
-                  font=("Segoe UI", 9), cursor="hand2")
-        tk.Button(pr, text="Save", command=self.save_prompt, **sb).pack(side="left", padx=(8, 4))
-        tk.Button(pr, text="Reset to default", command=self.reset_prompt, **sb).pack(side="left")
-        self.prompt_text = scrolledtext.ScrolledText(p, width=60, height=11, wrap="word", bg="#23262e", fg=FG,
-                                                     insertbackground=FG, relief="flat", font=("Consolas", 9))
-        self.prompt_text.pack(padx=10, pady=4)
-        self.prompt_text.bind("<Button-1>", lambda e: e.widget.focus_force())
+    def build_prompts(self, p):
+        self.label(p, "Prompt sent to the AI model (editable)", pady=(0, 4))
+        self.kind_seg = Segmented(p, ["Prompt mode", "Transcribe + AI clean"], lambda i: self.load_prompt(),
+                                  WIDTH - 32, 30, font=self.f(9, True))
+        self.kind_seg.pack(pady=(0, 8))
+        box, self.prompt_text = self.make_text(p, 11, (self.mono_fam, 9))
+        box.pack(fill="x")
+        row = tk.Frame(p, bg=BG)
+        row.pack(fill="x", pady=(10, 0))
+        Pill(row, "Save", self.save_prompt, 176, 32, bg=PURPLE, hover=mix(PURPLE, "#ffffff", 0.15), fg="#ffffff",
+             font=self.f(9, True)).pack(side="left")
+        Pill(row, "Reset to default", self.reset_prompt, 176, 32, font=self.f(9)).pack(side="right")
         self.load_prompt()
 
-        tk.Label(p, text="Last transcript from Gemini:", **lab).pack(fill="x", padx=10)
-        self.raw_text = scrolledtext.ScrolledText(p, width=60, height=4, wrap="word", bg="#23262e", fg=FG,
-                                                  relief="flat", font=("Segoe UI", 9))
-        self.raw_text.pack(padx=10, pady=2)
-        tk.Label(p, text="Last result:", **lab).pack(fill="x", padx=10)
-        self.out_text = scrolledtext.ScrolledText(p, width=60, height=6, wrap="word", bg="#23262e", fg=FG,
-                                                  relief="flat", font=("Segoe UI", 9))
-        self.out_text.pack(padx=10, pady=2)
-        br = tk.Frame(p, bg=BG)
-        br.pack(fill="x", padx=10, pady=(4, 10))
-        tk.Button(br, text="Copy result", command=self.copy_out, **sb).pack(side="left")
-        tk.Button(br, text="Re-run last as prompt", command=lambda: self.ctl.reprocess("prompt"), **sb).pack(
-            side="left", padx=6)
-        tk.Button(br, text="Diagnose Gemini", command=self.ctl.diagnose, **sb).pack(side="left")
-        tk.Button(br, text="Open log", command=lambda: os.path.exists(LOG) and os.startfile(LOG), **sb).pack(
-            side="left", padx=6)
+    def build_activity(self, p):
+        self.label(p, "Last transcript from Gemini", pady=(0, 4))
+        box, self.raw_text = self.make_text(p, 4, self.f(9))
+        box.pack(fill="x")
+        self.label(p, "Last result", pady=(10, 4))
+        box, self.out_text = self.make_text(p, 7, self.f(9))
+        box.pack(fill="x")
+        row = tk.Frame(p, bg=BG)
+        row.pack(fill="x", pady=(10, 0))
+        Pill(row, "Copy result", self.copy_out, 176, 32, font=self.f(9)).pack(side="left")
+        Pill(row, "Re-run as prompt", lambda: self.ctl.reprocess("prompt"), 176, 32, font=self.f(9)).pack(side="right")
+
+    def fit_on_screen(self):
+        """Keep the window on screen after the drawer opens or changes height."""
+        r = self.root
+        r.update_idletasks()
+        sh = r.winfo_screenheight()
+        h, x, y = r.winfo_reqheight(), r.winfo_x(), r.winfo_y()
+        if y + h > sh - 48:
+            r.geometry(f"+{x}+{max(0, sh - h - 48)}")
 
     def toggle_panel(self):
         self.expanded = not self.expanded
         if self.expanded:
             self.refresh_models()
             self.panel.pack(fill="x")
-            self.b_more.config(text="▴")
+            self.b_gear.set(bg=SURFACE_HI)
         else:
             self.panel.pack_forget()
-            self.b_more.config(text="▾")
+            self.b_gear.set(bg=SURFACE)
         self.root.update_idletasks()
+        if self.expanded:
+            self.fit_on_screen()
 
     def refresh_models(self):
         ms = all_models()
@@ -1364,6 +1693,7 @@ class Widget:
         if 0 <= i < len(self.model_keys):
             settings["model"] = self.model_keys[i]
             save_settings()
+        self.model_box.selection_clear()
 
     def on_clean_toggle(self):
         settings["clean_ai"] = bool(self.clean_var.get())
@@ -1374,7 +1704,7 @@ class Widget:
         save_settings()
 
     def kind(self):
-        return "prompt" if self.kind_box.current() == 0 else "clean"
+        return "prompt" if self.kind_seg.sel == 0 else "clean"
 
     def load_prompt(self):
         self.prompt_text.delete("1.0", "end")
@@ -1428,7 +1758,8 @@ class Widget:
 
     def set_status(self, state, text, revert=0):
         self.dot.itemconfig(self.dot_id, fill=COLORS.get(state, COLORS["idle"]))
-        self.status.config(text=text[:60])
+        self.status.config(text=text[:80], fg=ERR_TEXT if state == "err" else FG,
+                           font=self.f(10, True) if len(text) <= 32 else self.f(9, True))
         self.set_tray(state, text)
         if state == "err" and self.tray is not None and self.is_hidden():
             try:
@@ -1442,33 +1773,24 @@ class Widget:
         if self.ctl.state == "idle":
             self.set_status("idle", "Ready")
 
-    def set_buttons(self, recording, mode="clean"):
-        if recording:
-            self.b_clean.config(text="■  Stop → Transcribe")
-            self.b_prompt.config(text="■  Stop → Prompt")
-            self.b_cancel.pack(side="left", padx=(0, 6))
-        else:
-            self.b_clean.config(text="●  Transcribe")
-            self.b_prompt.config(text="✦  Prompt mode")
-            self.b_cancel.pack_forget()
-
     def put_text(self, box, text):
         box.delete("1.0", "end")
         box.insert("1.0", text)
 
     def handle(self, kind, kw):
         if kind == "status":
-            self.set_buttons(False)
+            self.set_rec_ui(False)
             self.set_status(kw["state"], kw["text"], revert=0 if kw.get("hold") or kw["state"] in ("starting", "busy")
                             else (6000 if kw["state"] == "err" else 2500))
         elif kind == "rec":
-            self.set_buttons(True)
-            self.rec_mode = kw["mode"]
+            self.rec_mode = self.sel_mode = kw["mode"]
+            self.mode_seg.select(0 if kw["mode"] == "clean" else 1)
+            self.set_rec_ui(True)
             self.set_tray("recp" if kw["mode"] == "prompt" else "rec", "Listening...")
         elif kind == "raw":
             self.put_text(self.raw_text, kw["text"])
         elif kind == "done":
-            self.set_buttons(False)
+            self.set_rec_ui(False)
             self.put_text(self.out_text, kw["text"])
             msg = ("Pasted + copied" if kw["pasted"] else "Copied to clipboard") + " · " + kw["info"]
             self.set_status("ok", msg, revert=4500)
@@ -1476,6 +1798,7 @@ class Widget:
             self.put_text(self.out_text, kw["text"])
             if not self.expanded:
                 self.toggle_panel()
+            self.show_page("Activity")
         elif kind == "cmd":
             {"show": self.show, "hide": self.hide, "toggle": self.toggle_visible}.get(kw["name"], lambda: None)()
 
@@ -1490,9 +1813,8 @@ class Widget:
             log("ui error\n" + traceback.format_exc())
         if self.ctl.state == "rec":
             secs = int(time.time() - self.ctl.rec_started)
-            mode = "prompt mode" if getattr(self, "rec_mode", "clean") == "prompt" else "transcribe"
-            self.dot.itemconfig(self.dot_id, fill=COLORS["recp" if mode == "prompt mode" else "rec"])
-            self.status.config(text=f"Listening {secs}s  ({mode})")
+            mode = "Prompt" if self.rec_mode == "prompt" else "Transcribe"
+            self.status.config(text=f"Listening {secs}s  ·  {mode}", fg=FG, font=self.f(10, True))
         self.root.after(100, self.poll)
 
     def poll_focus(self):
