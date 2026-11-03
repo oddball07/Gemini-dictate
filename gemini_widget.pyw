@@ -9,7 +9,8 @@
 #     edit in the widget, and pastes the finished prompt. "Transcribe" mode can optionally clean the text the same way.
 #   * Speech-to-text is NEVER done with the Gemini API here - only the website does the listening.
 #
-# Hotkeys:  Ctrl+Alt+Space = Transcribe     Ctrl+Alt+P = Prompt mode
+# Hotkeys:  Ctrl+Alt+Space = Transcribe     Ctrl+Alt+P = Prompt mode     Ctrl+Alt+W = show / hide the widget
+# The widget starts hidden in the tray (turn that off in the \u25be panel). Install:  pip install gemini-dictate
 #
 # pip install websocket-client pystray pillow keyboard pyperclip google-genai groq
 # (Windows only. Needs Google Chrome or Microsoft Edge installed.)
@@ -43,6 +44,7 @@ u32 = ctypes.windll.user32
 # ---------------- Settings ----------------
 HOTKEY = "ctrl+alt+space"         # start / stop dictation, "Transcribe" mode
 PROMPT_HOTKEY = "ctrl+alt+p"      # start / stop dictation, "Prompt" mode
+TOGGLE_HOTKEY = "ctrl+alt+w"      # show / hide the widget (it lives in the tray while hidden)
 CDP_PORT = 9223                   # local debugging port of the Gemini browser window (change if it clashes)
 GEMINI_URL = "https://gemini.google.com/app"
 BROWSER_PATH = ""                 # blank = find Chrome, then Edge automatically
@@ -132,13 +134,7 @@ def popup(msg):
         target=lambda: ctypes.windll.user32.MessageBoxW(0, msg, "Gemini Dictate", 0x40), daemon=True).start()
 
 
-_guard = socket.socket()
-try:
-    _guard.bind(("127.0.0.1", 47654))
-except OSError:
-    ctypes.windll.user32.MessageBoxW(0, "Gemini Dictate is already running (look for the mic icon in the tray).",
-                                     "Gemini Dictate", 0x40)
-    sys.exit(0)
+_guard = None      # the single-instance lock (a local socket), created in main()
 
 
 def read_json(path, default):
@@ -158,7 +154,7 @@ def write_json(path, data):
         log("could not write " + path)
 
 
-settings = {"model": "auto", "clean_ai": False}
+settings = {"model": "auto", "clean_ai": False, "start_hidden": True}
 settings.update(read_json(SETTINGS_FILE, {}))
 prompts = dict(DEFAULT_PROMPTS)
 prompts.update({k: v for k, v in read_json(PROMPTS_FILE, {}).items() if k in DEFAULT_PROMPTS and isinstance(v, str) and v.strip()})
@@ -1242,6 +1238,8 @@ class Widget:
         self.status = tk.Label(top, text="Starting...", bg=BG, fg=FG, font=("Segoe UI", 10, "bold"),
                                anchor="w", width=34)
         self.status.pack(side="left", padx=(8, 0))
+        tk.Button(top, text="\u2013", bg="#2b2f3a", activebackground="#3a3f4d", fg="white", relief="flat", bd=0,
+                  font=("Segoe UI", 10, "bold"), padx=9, cursor="hand2", command=self.hide).pack(side="right")
 
         row = tk.Frame(r, bg=BG)
         row.pack(fill="x", padx=10, pady=4)
@@ -1265,8 +1263,9 @@ class Widget:
                                    activebackground="#3c096c", command=lambda: ctl.reprocess("prompt"), **bs)
         self.b_convert.pack(side="left")
 
-        self.hint = tk.Label(r, text=f"{HOTKEY.upper()} = transcribe   {PROMPT_HOTKEY.upper()} = prompt mode",
-                             bg=BG, fg=MUTED, font=("Segoe UI", 8))
+        self.hint = tk.Label(r, text=f"{HOTKEY.upper()} = transcribe   {PROMPT_HOTKEY.upper()} = prompt mode\n"
+                                     f"{TOGGLE_HOTKEY.upper()} = show / hide this widget",
+                             bg=BG, fg=MUTED, font=("Segoe UI", 8), justify="left")
         self.hint.pack(anchor="w", padx=12, pady=(0, 8))
 
         self.panel = tk.Frame(r, bg=BG)
@@ -1275,6 +1274,8 @@ class Widget:
         r.update_idletasks()
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
         r.geometry(f"+{sw - r.winfo_reqwidth() - 30}+{sh - r.winfo_reqheight() - 120}")
+        if settings.get("start_hidden", True):
+            r.withdraw()                      # start in the tray; bring it back with the hotkey or the tray icon
         r.update()
         OUR_HWND = _root(r.winfo_id())
         self.poll()
@@ -1290,6 +1291,11 @@ class Widget:
         tk.Checkbutton(p, text="Also clean the transcript with AI in Transcribe mode", variable=self.clean_var,
                        command=self.on_clean_toggle, bg=BG, fg=FG, selectcolor="#2b2f3a", activebackground=BG,
                        activeforeground=FG, font=("Segoe UI", 9)).pack(anchor="w", padx=8)
+
+        self.hidden_var = tk.BooleanVar(value=bool(settings.get("start_hidden", True)))
+        tk.Checkbutton(p, text=f"Start hidden in the tray (show / hide with {TOGGLE_HOTKEY.upper()})",
+                       variable=self.hidden_var, command=self.on_hidden_toggle, bg=BG, fg=FG, selectcolor="#2b2f3a",
+                       activebackground=BG, activeforeground=FG, font=("Segoe UI", 9)).pack(anchor="w", padx=8)
 
         tk.Label(p, text="AI model for cleaning / prompt mode", **lab).pack(fill="x", padx=10, pady=(6, 0))
         self.model_box = ttk.Combobox(p, state="readonly", width=48)
@@ -1363,6 +1369,10 @@ class Widget:
         settings["clean_ai"] = bool(self.clean_var.get())
         save_settings()
 
+    def on_hidden_toggle(self):
+        settings["start_hidden"] = bool(self.hidden_var.get())
+        save_settings()
+
     def kind(self):
         return "prompt" if self.kind_box.current() == 0 else "clean"
 
@@ -1398,14 +1408,31 @@ class Widget:
         self.root.attributes("-topmost", True)
         self.root.lift()
 
+    def is_hidden(self):
+        return self.root.state() == "withdrawn"
+
+    def toggle_visible(self):
+        if self.is_hidden():
+            self.show()
+        else:
+            self.hide()
+
     # ---- status + events ----
-    def set_status(self, state, text, revert=0):
-        self.dot.itemconfig(self.dot_id, fill=COLORS.get(state, COLORS["idle"]))
-        self.status.config(text=text[:60])
+    def set_tray(self, state, text):
         if self.tray is not None:
             try:
                 self.tray.icon = ICONS.get(state, ICONS["idle"])
                 self.tray.title = "Gemini Dictate - " + text[:80]
+            except Exception:
+                pass
+
+    def set_status(self, state, text, revert=0):
+        self.dot.itemconfig(self.dot_id, fill=COLORS.get(state, COLORS["idle"]))
+        self.status.config(text=text[:60])
+        self.set_tray(state, text)
+        if state == "err" and self.tray is not None and self.is_hidden():
+            try:
+                self.tray.notify(text[:200], "Gemini Dictate")     # the widget is hidden: tell you another way
             except Exception:
                 pass
         if revert:
@@ -1437,6 +1464,7 @@ class Widget:
         elif kind == "rec":
             self.set_buttons(True)
             self.rec_mode = kw["mode"]
+            self.set_tray("recp" if kw["mode"] == "prompt" else "rec", "Listening...")
         elif kind == "raw":
             self.put_text(self.raw_text, kw["text"])
         elif kind == "done":
@@ -1449,7 +1477,7 @@ class Widget:
             if not self.expanded:
                 self.toggle_panel()
         elif kind == "cmd":
-            {"show": self.show, "hide": self.hide}.get(kw["name"], lambda: None)()
+            {"show": self.show, "hide": self.hide, "toggle": self.toggle_visible}.get(kw["name"], lambda: None)()
 
     def poll(self):
         try:
@@ -1509,21 +1537,37 @@ def make_tray(app, ctl):
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(f"{HOTKEY.upper()} = transcribe", None, enabled=False),
         pystray.MenuItem(f"{PROMPT_HOTKEY.upper()} = prompt mode", None, enabled=False),
+        pystray.MenuItem(f"{TOGGLE_HOTKEY.upper()} = show / hide widget", None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit (also closes the hidden Gemini window)", quit_app),
     )
     return pystray.Icon("gemini_dictate", ICONS["idle"], "Gemini Dictate", menu)
 
 
-ui_queue = queue.Queue()
-controller = Controller(ui_queue)
-SITE_FALLBACK = controller.site      # lets rewrite() fall back to the Gemini website
-widget = Widget(controller, ui_queue)
-widget.tray = make_tray(widget, controller)
-widget.tray.run_detached()
+def main():
+    """Entry point (the `dictate` command, `python -m gemini_dictate`, or running this file directly)."""
+    global SITE_FALLBACK, _guard
+    _guard = socket.socket()
+    try:
+        _guard.bind(("127.0.0.1", 47654))
+    except OSError:
+        u32.MessageBoxW(0, "Gemini Dictate is already running (look for the mic icon in the tray).",
+                        "Gemini Dictate", 0x40)
+        return
+    ui_queue = queue.Queue()
+    controller = Controller(ui_queue)
+    SITE_FALLBACK = controller.site      # lets rewrite() fall back to the Gemini website
+    widget = Widget(controller, ui_queue)
+    widget.tray = make_tray(widget, controller)
+    widget.tray.run_detached()
 
-keyboard.add_hotkey(HOTKEY, lambda: controller.toggle("clean"))
-keyboard.add_hotkey(PROMPT_HOTKEY, lambda: controller.toggle("prompt"))
+    keyboard.add_hotkey(HOTKEY, lambda: controller.toggle("clean"))
+    keyboard.add_hotkey(PROMPT_HOTKEY, lambda: controller.toggle("prompt"))
+    keyboard.add_hotkey(TOGGLE_HOTKEY, lambda: ui_queue.put(("cmd", {"name": "toggle"})))
 
-threading.Thread(target=controller.warmup, daemon=True).start()
-widget.run()
+    threading.Thread(target=controller.warmup, daemon=True).start()
+    widget.run()
+
+
+if __name__ == "__main__":
+    main()
