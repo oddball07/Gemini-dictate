@@ -1,0 +1,7 @@
+websocket-client
+pystray
+pillow
+keyboard
+pyperclip
+google-genai
+groq
